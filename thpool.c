@@ -165,8 +165,19 @@ struct thpool_* thpool_init(int num_threads){
 #endif
 	}
 
+    
 	/* Wait for threads to initialize */
-	while (thpool_p->num_threads_alive != num_threads) {}
+	pthread_mutex_lock(&thpool_p->thcount_lock);
+	int threads_alive=thpool_p->num_threads_alive;
+	pthread_mutex_unlock(&thpool_p->thcount_lock);
+	
+	while (threads_alive != num_threads){
+	    pthread_mutex_lock(&thpool_p->thcount_lock);
+		bsem_post_all(thpool_p->jobqueue.has_jobs);
+		threads_alive=thpool_p->num_threads_alive;
+		pthread_mutex_unlock(&thpool_p->thcount_lock);
+		sched_yield();
+	}
 
 	return thpool_p;
 }
@@ -208,7 +219,9 @@ void thpool_destroy(thpool_* thpool_p){
 	/* No need to destory if it's NULL */
 	if (thpool_p == NULL) return ;
 
+    pthread_mutex_lock(&thpool_p->thcount_lock);
 	volatile int threads_total = thpool_p->num_threads_alive;
+    pthread_mutex_unlock(&thpool_p->thcount_lock);
 
 	/* End each thread 's infinite loop */
 	threads_keepalive = 0;
@@ -218,18 +231,34 @@ void thpool_destroy(thpool_* thpool_p){
 	time_t start, end;
 	double tpassed = 0.0;
 	time (&start);
-	while (tpassed < TIMEOUT && thpool_p->num_threads_alive){
+	
+	pthread_mutex_lock(&thpool_p->thcount_lock);
+	int threads_alive=thpool_p->num_threads_alive;
+	pthread_mutex_unlock(&thpool_p->thcount_lock);
+	
+	while (tpassed < TIMEOUT && threads_alive){
+		pthread_mutex_lock(&thpool_p->thcount_lock);
 		bsem_post_all(thpool_p->jobqueue.has_jobs);
+		threads_alive=thpool_p->num_threads_alive;
+		pthread_mutex_unlock(&thpool_p->thcount_lock);
+		
 		time (&end);
 		tpassed = difftime(end,start);
 	}
 
 	/* Poll remaining threads */
-	while (thpool_p->num_threads_alive){
+	pthread_mutex_lock(&thpool_p->thcount_lock);
+	threads_alive=thpool_p->num_threads_alive;
+	pthread_mutex_unlock(&thpool_p->thcount_lock);
+	while (threads_alive){
+	    pthread_mutex_lock(&thpool_p->thcount_lock);
 		bsem_post_all(thpool_p->jobqueue.has_jobs);
-		sleep(1);
+		threads_alive=thpool_p->num_threads_alive;
+		pthread_mutex_unlock(&thpool_p->thcount_lock);
+        sched_yield();
 	}
-
+	
+	
 	/* Job queue cleanup */
 	jobqueue_destroy(&thpool_p->jobqueue);
 	/* Deallocs */
