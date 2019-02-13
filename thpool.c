@@ -8,6 +8,9 @@
  *
  ********************************/
 
+#ifdef __ZEPHYR__
+#include "iot/os.h"
+#endif
 #define _POSIX_C_SOURCE 200809L
 #include <unistd.h>
 #include <signal.h>
@@ -37,7 +40,11 @@
 static volatile int threads_keepalive;
 static volatile int threads_on_hold;
 
-
+#ifdef __ZEPHYR__
+#define STACK_SIZE 4096
+#define MAX_THREADS 5
+static K_THREAD_STACK_ARRAY_DEFINE(thread_stacks, MAX_THREADS, STACK_SIZE);
+#endif
 
 /* ========================== STRUCTURES ============================ */
 
@@ -95,7 +102,9 @@ typedef struct thpool_{
 
 static int  thread_init(thpool_* thpool_p, struct thread** thread_p, int id);
 static void* thread_do(struct thread* thread_p);
+#ifndef __ZEPHYR__
 static void  thread_hold(int sig_id);
+#endif
 static void  thread_destroy(struct thread* thread_p);
 
 static int   jobqueue_init(jobqueue* jobqueue_p);
@@ -202,6 +211,17 @@ void thpool_wait(thpool_* thpool_p){
 	pthread_mutex_unlock(&thpool_p->thcount_lock);
 }
 
+#ifdef __ZEPHYR__
+static void time (time_t *t)
+{
+  *t = k_uptime_get ();
+}
+
+static double difftime (time_t end, time_t start)
+{
+  return (end - start) / 1000.0;
+}
+#endif
 
 /* Destroy the threadpool */
 void thpool_destroy(thpool_* thpool_p){
@@ -246,7 +266,11 @@ void thpool_destroy(thpool_* thpool_p){
 void thpool_pause(thpool_* thpool_p) {
 	int n;
 	for (n=0; n < thpool_p->num_threads_alive; n++){
-		pthread_kill(thpool_p->threads[n]->pthread, SIGUSR1);
+#ifdef __ZEPHYR__
+          pthread_cancel(thpool_p->threads[n]->pthread);
+#else
+          pthread_kill(thpool_p->threads[n]->pthread, SIGUSR1);
+#endif
 	}
 }
 
@@ -289,13 +313,24 @@ static int thread_init (thpool_* thpool_p, struct thread** thread_p, int id){
 
 	(*thread_p)->thpool_p = thpool_p;
 	(*thread_p)->id       = id;
-
-	pthread_create(&(*thread_p)->pthread, NULL, (void *)thread_do, (*thread_p));
-	pthread_detach((*thread_p)->pthread);
+#ifdef __ZEPHYR__
+        pthread_attr_t attr;
+        struct sched_param schedparam;
+        pthread_attr_init (&attr);
+        pthread_attr_setstack (&attr, thread_stacks[id], STACK_SIZE);
+        schedparam.priority = CONFIG_NUM_COOP_PRIORITIES - 1;
+        pthread_attr_setschedparam (&attr, &schedparam);
+        pthread_attr_setschedpolicy (&attr, SCHED_FIFO);
+	pthread_create(&(*thread_p)->pthread, &attr, (void *)thread_do, (*thread_p));
+#else
+        pthread_create(&(*thread_p)->pthread, NULL, (void *)thread_do, (*thread_p));
+#endif
+        pthread_detach((*thread_p)->pthread);
 	return 0;
 }
 
 
+#ifndef __ZEPHYR__
 /* Sets the calling thread on hold */
 static void thread_hold(int sig_id) {
     (void)sig_id;
@@ -304,7 +339,7 @@ static void thread_hold(int sig_id) {
 		sleep(1);
 	}
 }
-
+#endif
 
 /* What each thread is doing
 *
@@ -332,6 +367,7 @@ static void* thread_do(struct thread* thread_p){
 	/* Assure all threads have been created before starting serving */
 	thpool_* thpool_p = thread_p->thpool_p;
 
+#ifndef __ZEPHYR__
 	/* Register signal handler */
 	struct sigaction act;
 	sigemptyset(&act.sa_mask);
@@ -340,6 +376,7 @@ static void* thread_do(struct thread* thread_p){
 	if (sigaction(SIGUSR1, &act, NULL) == -1) {
 		err("thread_do(): cannot handle SIGUSR1");
 	}
+#endif
 
 	/* Mark thread as alive (initialized) */
 	pthread_mutex_lock(&thpool_p->thcount_lock);
@@ -506,10 +543,7 @@ static void jobqueue_destroy(jobqueue* jobqueue_p){
 
 /* Init semaphore to 1 or 0 */
 static void bsem_init(bsem *bsem_p, int value) {
-	if (value < 0 || value > 1) {
-		err("bsem_init(): Binary semaphore can take only values 1 or 0");
-		exit(1);
-	}
+        assert (value >= 0 && value <= 1);
 	pthread_mutex_init(&(bsem_p->mutex), NULL);
 	pthread_cond_init(&(bsem_p->cond), NULL);
 	bsem_p->v = value;
