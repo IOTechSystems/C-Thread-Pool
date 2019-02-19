@@ -10,7 +10,7 @@
 
 #ifdef __ZEPHYR__
 #include "iot/os.h"
-#endif
+#else
 #define _POSIX_C_SOURCE 200809L
 #include <unistd.h>
 #include <signal.h>
@@ -21,6 +21,7 @@
 #include <time.h>
 #if defined(__linux__)
 #include <sys/prctl.h>
+#endif
 #endif
 
 #include "thpool.h"
